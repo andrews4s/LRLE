@@ -31,7 +31,7 @@ namespace LREParser
             var o = Path.Combine(f, outDir);
             if (Directory.Exists(o)) Directory.Delete(o, true);
             Directory.CreateDirectory(o);
-            
+
             foreach (var lrle in files)
                 ProcessLRLE(lrle, Path.Combine(o, Path.GetFileName(lrle)), true);
         }
@@ -58,7 +58,7 @@ namespace LREParser
                 foreach (var mip in lrleReader.Read())
                 {
                     var bmp = ExtractMipMapData(outputFile, mip);
-                    if(convertBack)
+                    if (convertBack)
                         lrleWriter.AddMip(mip.Width, mip.Height, GetPixelData(bmp));
                 }
                 if (convertBack)
@@ -111,7 +111,7 @@ namespace LREParser
                     foreach (var run in chunk.Runs)
                     {
                         color = BitConverter.GetBytes(run.Color);
-                        mipText.WriteLine($"{chunk.Command} {FormatColor(color)} * {run.Length} {Convert.ToString(run.Length, 2)}");
+                        mipText.WriteLine($"{Convert.ToString(chunk.CommandByte & 7, 2).PadLeft(3, '0')} {FormatColor(color)} * {run.Length} {Convert.ToString(run.Length, 2)}");
                         for (int j = 0; j < run.Length; j++)
                             Array.Copy(color, 0, pixels, 4 * LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, mip.Width), 4);
                         mipText.Flush();
