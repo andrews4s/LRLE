@@ -71,7 +71,7 @@ namespace LRLE
                     //If the ones used the most are at the front,
                     //we can limit the number of 16 bit indexes.
                     .GroupBy(x => x.Color)
-                    .OrderByDescending(x => x.Sum(y => (decimal)y.Length))
+                    .OrderByDescending(x => x.Count())
                     //Finally, select the distinct color list.
                     .Select(x => x.Key)
                     .Take(ushort.MaxValue)
