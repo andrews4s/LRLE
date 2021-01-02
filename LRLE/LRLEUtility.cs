@@ -31,10 +31,6 @@ namespace LRLE
                 public int Height { get; set; }
             }
             public List<Mip> Mips { get; set; } = new List<Mip>();
-            public void AddMip(int width, int height, IEnumerable<PixelRun> runs)
-            {
-                this.Mips.Add(new Mip { Width = width, Height = height, Runs = new List<PixelRun>(runs) });
-            }
             public void AddMip(int width, int height, byte[] rawARGBPixelData)
             {
                 this.Mips.Add(new Mip { Width = width, Height = height, Runs = new List<PixelRun>(ExtractPixelRuns(rawARGBPixelData, width)) });
@@ -397,16 +393,12 @@ namespace LRLE
 
                 private static void ReadInlinePixelRepeat(BinaryReader s, byte lengthByte, Chunk chunk)
                 {
-                    var lengthBytes = ReadHighBitSequence(s, lengthByte);
-                    var count = ReadPackedInt(lengthBytes, 2);
-                    chunk.AddRun(count, s.ReadInt32());
+                    chunk.AddRun(ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2), s.ReadInt32());
                 }
 
                 private static void ReadBlankPixelRepeat(BinaryReader s, byte lengthByte, Chunk chunk)
                 {
-                    var lengthBytes = ReadHighBitSequence(s, lengthByte);
-                    var count = ReadPackedInt(lengthBytes, 2);
-                    chunk.AddRun(count, 0);
+                    chunk.AddRun(ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2), 0);
                 }
 
                 Chunk ReadV002Chunk(BinaryReader s, int[] palette)
@@ -415,7 +407,6 @@ namespace LRLE
                     var lengthBytes = ReadHighBitSequence(s).ToList();
                     var cmdByte = lengthBytes[0];
                     var commandType = cmdByte & 1;
-                    var offset = s.BaseStream.Position;
                     var chunk = new Chunk { CommandByte = cmdByte };
                     switch (commandType)
                     {
