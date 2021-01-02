@@ -76,6 +76,7 @@ namespace LRLE
                     .Select(x => x.Key)
                     .Take(ushort.MaxValue)
                     .ToList();
+                var paletteLookup = Enumerable.Range(0, palette.Count).ToDictionary(x => palette[x], x => x);
                 s.Seek(headerSize, SeekOrigin.Begin);
                 s.Write(palette.Count);
                 var cmdOffsets = new uint[mipCount];
@@ -88,9 +89,9 @@ namespace LRLE
                     foreach (var runList in GroupPixelRuns(mip.Runs))
                     {
                         if (runList.Length == 1 && runList[0].Length > 1)
-                            WritePixelRepeat(s, palette, runList[0]);
+                            WritePixelRepeat(s, paletteLookup, runList[0]);
                         else
-                            WritePixelSequence(s, palette, runList);
+                            WritePixelSequence(s, paletteLookup, runList);
 
                     }
                 }
@@ -106,9 +107,9 @@ namespace LRLE
 
             }
 
-            private static void WritePixelRepeat(BinaryWriter s, List<int> palette, PixelRun run)
+            private static void WritePixelRepeat(BinaryWriter s, Dictionary<int, int> palette, PixelRun run)
             {
-                var paletteIndex = palette.IndexOf(run.Color);
+                var paletteIndex = palette.ContainsKey(run.Color) ? palette[run.Color] : -1;
                 var flag = paletteIndex < 0 ? 6 //Inline
                     : paletteIndex <= byte.MaxValue ? 2 //Byte index
                     : 4; //Short index
@@ -128,9 +129,9 @@ namespace LRLE
                 }
             }
 
-            private static void WritePixelSequence(BinaryWriter s, List<int> palette, PixelRun[] runs)
+            private static void WritePixelSequence(BinaryWriter s, Dictionary<int, int> palette, PixelRun[] runs)
             {
-                var flag = runs.Any(x => palette.IndexOf(x.Color) < 0) ? 3 : 1;
+                var flag = runs.Any(x => palette.ContainsKey(x.Color) == false) ? 3 : 1;
                 var runBytes = LRLEUtility.WritePackedInt(runs.Length, (byte)flag, 2).ToArray();
                 s.Write(runBytes);
                 foreach (var run in runs)
@@ -138,7 +139,7 @@ namespace LRLE
                     switch (flag)
                     {
                         case 1:
-                            s.Write(WritePackedInt(palette.IndexOf(run.Color), 0, 0).ToArray());
+                            s.Write(WritePackedInt(palette[run.Color], 0, 0).ToArray());
                             break;
                         case 3:
                             s.Write(run.Color);
