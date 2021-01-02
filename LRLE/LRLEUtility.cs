@@ -381,7 +381,7 @@ namespace LRLE
                             pixelBuffer[i+ count],
                             pixelBuffer[i+ 2*count],
                             pixelBuffer[i+ 3*count]
-                        }));
+                        }, 0));
 
                     }
                 }
