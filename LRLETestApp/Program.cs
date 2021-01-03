@@ -5,18 +5,26 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using LRLE;
-
+using Microsoft.Extensions.Configuration;
 namespace LREParser
 {
     class MainClass
     {
-        const string outDir = "out";
+        static string outDir = "out";
         static bool logText = false;
-        static bool roundtrip = false;
-        static bool saveMips = false;
-        static int maxMips = 1;
+        static bool roundtrip = true;
+        static bool saveMips = true;
+        static int maxMips = 10;
         public static void Main(string[] args)
         {
+            var conf = new ConfigurationBuilder()
+                .AddCommandLine(args)
+                .Build();
+            outDir = conf[nameof(outDir)] ?? "out";
+            maxMips = int.Parse(conf[nameof(maxMips)] ?? "10");
+            logText = (conf[nameof(logText)] ?? "false").ToLower() == "true";
+            roundtrip = (conf[nameof(roundtrip)] ?? "true").ToLower() == "true";
+            saveMips = (conf[nameof(saveMips)] ?? "true").ToLower() == "true";
             var f = args.Length == 0 ?
                 Path.GetDirectoryName(typeof(MainClass).Assembly.Location) :
                 args[0];

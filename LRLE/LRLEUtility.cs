@@ -467,9 +467,9 @@ namespace LRLE
             return (int)u;
         }
 
-        public static int BlockIndexToScanlineIndex(int block_index, int stride)
+        public static int BlockIndexToScanlineIndex(int block_index, int width)
         {
-            var block_row_size = stride >> 2 << 4;
+            var block_row_size = width << 2;
 
             int block_row = block_index / block_row_size;
             int block_column = block_index % block_row_size >> 4;
@@ -479,11 +479,11 @@ namespace LRLE
 
             int scanline_row = (block_row << 2) + block_index_row;
             int scanline_column = (block_column << 2) + block_index_column;
-            int scanline_index = (scanline_row * stride) + scanline_column;
+            int scanline_index = (scanline_row * width) + scanline_column;
             return scanline_index;
 
         }
-        public static List<PixelRun> ExtractPixelRuns(byte[] argbPixels, int stride)
+        public static List<PixelRun> ExtractPixelRuns(byte[] argbPixels, int width)
         {
             int? lastColor = null;
             int runLength = 0;
@@ -491,7 +491,7 @@ namespace LRLE
             var pixels = argbPixels.Length >> 2;
             for (int i = 0; i < pixels; i++)
             {
-                var index = BlockIndexToScanlineIndex(i, stride);
+                var index = BlockIndexToScanlineIndex(i, width);
 
                 var c = BitConverter.ToInt32(argbPixels, index << 2);
                 if (lastColor == null)
