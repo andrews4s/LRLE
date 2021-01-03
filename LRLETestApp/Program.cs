@@ -14,6 +14,7 @@ namespace LREParser
         static bool logText = false;
         static bool roundtrip = false;
         static bool saveMips = false;
+        static int maxMips = 1;
         public static void Main(string[] args)
         {
             var f = args.Length == 0 ?
@@ -65,7 +66,7 @@ namespace LREParser
                 var lrleReader = LRLEUtility.GetReader(fs);
                 var lrleWriter = LRLEUtility.GetWriter();
                 if (logText) WritePaletteText(outputFile, lrleReader);
-                foreach (var mip in lrleReader.Read())
+                foreach (var mip in lrleReader.Read().Take(maxMips))
                 {
                     var bmp = ExtractMipMapData(outputFile, mip);
                     if (convertBack)
