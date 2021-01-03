@@ -11,6 +11,9 @@ namespace LREParser
     class MainClass
     {
         const string outDir = "out";
+        static bool logText = false;
+        static bool roundtrip = false;
+        static bool saveMips = false;
         public static void Main(string[] args)
         {
             var f = args.Length == 0 ?
@@ -31,9 +34,16 @@ namespace LREParser
             var o = Path.Combine(f, outDir);
             if (Directory.Exists(o)) Directory.Delete(o, true);
             Directory.CreateDirectory(o);
-
-            foreach (var lrle in files)
-                ProcessLRLE(lrle, Path.Combine(o, Path.GetFileName(lrle)), true);
+            using (new ConsoleStopWatch("All files"))
+            {
+                foreach (var lrle in files)
+                {
+                    using (new ConsoleStopWatch(Path.GetFileName(lrle)))
+                    {
+                        ProcessLRLE(lrle, Path.Combine(o, Path.GetFileName(lrle)), roundtrip);
+                    }
+                }
+            }
         }
 
         static string FormatColor(byte[] ci) => FormatColor(BitConverter.ToUInt32(ci, 0));
@@ -43,7 +53,7 @@ namespace LREParser
         static byte[] GetPixelData(Bitmap bmp)
         {
             var bits = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            var buffer = new byte[bmp.Width * bmp.Height * sizeof(int)];
+            var buffer = new byte[bmp.Width * bmp.Height << 2];
             Marshal.Copy(bits.Scan0, buffer, 0, buffer.Length);
             bmp.UnlockBits(bits);
             return buffer;
@@ -54,7 +64,7 @@ namespace LREParser
             {
                 var lrleReader = LRLEUtility.GetReader(fs);
                 var lrleWriter = LRLEUtility.GetWriter();
-                WritePaletteText(outputFile, lrleReader);
+                if (logText) WritePaletteText(outputFile, lrleReader);
                 foreach (var mip in lrleReader.Read())
                 {
                     var bmp = ExtractMipMapData(outputFile, mip);
@@ -95,32 +105,64 @@ namespace LREParser
 
         private static Bitmap ExtractMipMapData(string outputFile, LRLEUtility.Reader.Mip mip)
         {
-            byte[] color;
-            using (var mipText = File.CreateText(outputFile + $".mip{mip.Index}.txt"))
-            {
+            byte[] color = null;
+            StreamWriter mipText = null;
+            if (logText) mipText = File.CreateText(outputFile + $".mip{mip.Index}.txt");
 
-                var bmp = new Bitmap(mip.Width, mip.Height);
-                var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            var bmp = new Bitmap(mip.Width, mip.Height);
+            var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            if (logText)
+            {
                 mipText.WriteLine($"{mip.Start:X16} - {mip.End:X16}");
                 mipText.WriteLine($"Mip [{mip.Index}] {mip.Width}x{mip.Height}={(mip.Width * mip.Height):X8}|{mip.Width * mip.Height} ({mip.Length})");
-
-                var pixels = new byte[mip.Width * mip.Height * 4];
-                int pixelsWritten = 0;
-                foreach (var chunk in mip.Read())
+            }
+            var pixels = new byte[mip.Width * mip.Height << 2];
+            int pixelsWritten = 0;
+            foreach (var chunk in mip.Read())
+            {
+                foreach (var run in chunk.Runs)
                 {
-                    foreach (var run in chunk.Runs)
-                    {
-                        color = BitConverter.GetBytes(run.Color);
-                        mipText.WriteLine($"{Convert.ToString(chunk.CommandByte & 7, 2).PadLeft(3, '0')} {FormatColor(color)} * {run.Length} {Convert.ToString(run.Length, 2)}");
-                        for (int j = 0; j < run.Length; j++)
-                            Array.Copy(color, 0, pixels, 4 * LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, mip.Width), 4);
-                        mipText.Flush();
-                    }
+                    if (saveMips) color = BitConverter.GetBytes(run.Color);
+                    if (logText) mipText.WriteLine($"{Convert.ToString(chunk.CommandByte & 7, 2).PadLeft(3, '0')} {FormatColor(color)} * {run.Length} {Convert.ToString(run.Length, 2)}");
+                    if (saveMips) for (int j = 0; j < run.Length; j++) Array.Copy(color, 0, pixels, LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, mip.Width) << 2, 4);
+                    if (logText) mipText.Flush();
                 }
+            }
+            if (logText) mipText.Close();
+            if (saveMips)
+            {
                 Marshal.Copy(pixels, 0, bits.Scan0, pixels.Length);
                 bmp.UnlockBits(bits);
-                bmp.Save(outputFile + $".mip{mip.Index}.png");
-                return bmp;
+            }
+            if (saveMips) bmp.Save(outputFile + $".mip{mip.Index}.png");
+            return bmp;
+
+        }
+        class ConsoleStopWatch : IDisposable
+        {
+            private readonly string subject;
+            private readonly Stopwatch stopwatch;
+
+            public ConsoleStopWatch(string subject)
+            {
+                this.subject = subject;
+                this.stopwatch = new Stopwatch();
+                this.stopwatch.Start();
+            }
+
+            public void Dispose()
+            {
+                this.Stop();
+            }
+
+            private void Stop()
+            {
+                if (this.stopwatch.IsRunning)
+                {
+                    this.stopwatch.Stop();
+                }
+                Debug.WriteLine($"{subject} finished in {(stopwatch.ElapsedMilliseconds) / 1000.0} s");
             }
         }
 
