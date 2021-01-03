@@ -63,7 +63,7 @@ namespace LRLE
             {
                 var s = new BinaryWriter(fs);
                 var mipCount = this.Mips.Count;
-                var headerSize = 16 + (mipCount * 4);
+                var headerSize = 16 + (mipCount << 2);
                 var palette =
                     //Select all runs from all mips to get a full palette for the whole image.
                     (from mip in Mips from run in mip.Runs select run)
@@ -244,7 +244,7 @@ namespace LRLE
                 }
                 public byte[] GetPixels()
                 {
-                    var pixels = new byte[Width * Height * 4];
+                    var pixels = new byte[Width * Height << 2];
                     int pixelsWritten = 0;
                     byte[] color;
                     foreach (var chunk in Read())
@@ -253,7 +253,7 @@ namespace LRLE
                         {
                             color = BitConverter.GetBytes(run.Color);
                             for (int j = 0; j < run.Length; j++)
-                                Array.Copy(color, 0, pixels, 4 * LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, Width), 4);
+                                Array.Copy(color, 0, pixels, LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, Width) << 2, 4);
                         }
                     }
                     return pixels;
@@ -343,7 +343,7 @@ namespace LRLE
                 private static void ReadEmbeddedRLE(BinaryReader s, byte lengthByte, Chunk chunk)
                 {
                     var count = lengthByte >> 2;
-                    var pixelBuffer = new byte[4 * count];
+                    var pixelBuffer = new byte[count<< 2];
                     var pixelPtr = 0;
                     while (pixelPtr < pixelBuffer.Length)
                     {
@@ -376,8 +376,8 @@ namespace LRLE
                         chunk.AddRun(1, BitConverter.ToInt32(new byte[] {
                             pixelBuffer[i],
                             pixelBuffer[i+ count],
-                            pixelBuffer[i+ 2*count],
-                            pixelBuffer[i+ 3*count]
+                            pixelBuffer[i+ count + count],
+                            pixelBuffer[i+ count + count + count]
                         }, 0));
 
                     }
@@ -461,9 +461,8 @@ namespace LRLE
         public static int ReadPackedInt(IEnumerable<byte> bytes, int startBit)
         {
             ulong u = 0;
-            int i = 0;
-            foreach (var b in bytes)
-                u |= ((uint)b & 0x7F) << (7 * i++);
+            int shift = 0;
+            foreach (var b in bytes) { u |= ((uint)b & 0x7F) << shift; shift += 7; }
             u >>= startBit;
             return (int)u;
         }
@@ -494,7 +493,7 @@ namespace LRLE
             {
                 var index = BlockIndexToScanlineIndex(i, stride);
 
-                var c = BitConverter.ToInt32(argbPixels, index * 4);
+                var c = BitConverter.ToInt32(argbPixels, index << 2);
                 if (lastColor == null)
                 {
                     lastColor = c;
