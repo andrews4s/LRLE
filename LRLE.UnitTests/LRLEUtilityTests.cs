@@ -42,9 +42,9 @@ namespace LRLETests
         [InlineData(128, 15, (3 * 128) + (0 * 4) + 3)]
         [InlineData(128, 16, (0 * 128) + (1 * 4) + 0)]
         [InlineData(128, (128 * 4) + 1, (4 * 128) + (0 * 4) + 1)]
-        public void TestBlockIndexToScanLineIndex(int stride, int block_index, int scanline_index)
+        public void TestBlockIndexToScanLineIndex(int width, int block_index, int scanline_index)
         {
-            Assert.Equal(scanline_index, BlockIndexToScanlineIndex(block_index, stride));
+            Assert.Equal(scanline_index, BlockIndexToScanlineIndex(block_index, width, width));
         }
     }
 }

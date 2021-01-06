@@ -7,91 +7,123 @@ namespace LRLE
 {
     public static class LRLEUtility
     {
-        const uint LRLE = 0x454C524C;
+        public const uint LRLE = 0x454C524C;
         public enum LRLEFormat
         {
             Default = 0,
             V002 = 842018902
         }
-        public class PixelRun
+        public readonly struct PixelRun
         {
-            public int Length { get; set; }
-            public int Color { get; set; }
-            public override string ToString()
-            {
-                return $"{Color:X8} x {Length}";
-            }
+            public PixelRun(int c, int l) { Color = c; Length = l; }
+            public readonly int Color;
+            public readonly int Length;
+            public override string ToString() { return $"{Color:X8} x {Length}"; }
         }
         public class Writer
         {
             public class Mip
             {
-                public List<PixelRun> Runs { get; set; } = new List<PixelRun>();
+                public List<PixelRun[]> Runs { get; set; } = new List<PixelRun[]>();
                 public int Width { get; set; }
                 public int Height { get; set; }
             }
             public List<Mip> Mips { get; set; } = new List<Mip>();
+
+            readonly IDictionary<int, int> paletteOccurrences = new Dictionary<int, int>(ushort.MaxValue);
             public void AddMip(int width, int height, byte[] rawARGBPixelData)
             {
-                this.Mips.Add(new Mip { Width = width, Height = height, Runs = new List<PixelRun>(ExtractPixelRuns(rawARGBPixelData, width)) });
+                this.Mips.Add(new Mip { Width = width, Height = height, Runs = ExtractPixelRuns(rawARGBPixelData, width, height) });
             }
-            IEnumerable<PixelRun[]> GroupPixelRuns(IList<PixelRun> runs)
+            public List<PixelRun[]> ExtractPixelRuns(byte[] argbPixels, int width, int height)
             {
+                int lastColor = 0;
+                int runLength = 0;
+                var allRuns = new List<PixelRun[]>();
                 var runList = new List<PixelRun>();
-                foreach (var run in runs)
+                var pixels = argbPixels.Length >> 2;
+                for (int i = 0; i < pixels; i++)
                 {
-                    if (run.Length > 1)
+                    var index = BlockIndexToScanlineIndex(i, width, height) << 2;
+                    var c = BitConverter.ToInt32(argbPixels, index);
+                    if (paletteOccurrences.ContainsKey(c))
+                        paletteOccurrences[c]++;
+                    else
+                        paletteOccurrences[c] = 1;
+                    if (i == 0)
                     {
-                        if (runList.Any())
-                        {
-                            yield return runList.ToArray();
-                            runList = new List<PixelRun>();
-                        }
-                        yield return new[] { run };
+                        lastColor = c;
+                        runLength++;
+                    }
+                    else if (c == lastColor)
+                    {
+                        runLength++;
                     }
                     else
                     {
-                        runList.Add(run);
+                        if (runLength > 1)
+                        {
+                            if (runList.Any())
+                            {
+                                allRuns.Add(runList.ToArray());
+                                runList = new List<PixelRun>();
+                            }
+                            allRuns.Add(new[] { new PixelRun(lastColor, runLength) });
+                        }
+                        else
+                        {
+                            runList.Add(new PixelRun(lastColor, 1));
+                        }
+                        lastColor = c;
+                        runLength = 1;
                     }
                 }
-                if (runList.Any())
+                if (runLength > 1)
                 {
-                    yield return runList.ToArray();
+                    if (runList.Any())
+                    {
+                        allRuns.Add(runList.ToArray());
+                    }
+                    allRuns.Add(new[] { new PixelRun(lastColor, runLength) });
                 }
+                else
+                {
+                    allRuns.Add(runList.ToArray());
+                }
+                return allRuns;
             }
             public void Write(Stream fs)
             {
                 var s = new BinaryWriter(fs);
                 var mipCount = this.Mips.Count;
                 var headerSize = 16 + (mipCount << 2);
-                var palette =
-                    //Select all runs from all mips to get a full palette for the whole image.
-                    (from mip in Mips from run in mip.Runs select run)
-                    //Group by color and sort by most used palette indexes.
-                    //If the ones used the most are at the front,
-                    //we can limit the number of 16 bit indexes.
-                    .GroupBy(x => x.Color)
-                    .OrderByDescending(x => x.Count())
-                    //Finally, select the distinct color list.
-                    .Select(x => x.Key)
+
+                var paletteArray =
+                    paletteOccurrences
+                    .OrderByDescending(x => x.Value)
                     .Take(ushort.MaxValue)
-                    .ToList();
-                var paletteLookup = Enumerable.Range(0, palette.Count).ToDictionary(x => palette[x], x => x);
+                    .Select(x => x.Key)
+                    .ToArray();
+                var palette =
+                    Enumerable
+                        .Range(0, paletteArray.Length)
+                        .ToDictionary(x => paletteArray[x], x => x);
+
                 s.Seek(headerSize, SeekOrigin.Begin);
-                s.Write(palette.Count);
+                s.Write(paletteArray.Length);
                 var cmdOffsets = new uint[mipCount];
-                foreach (var p in palette) s.Write(p);
+                foreach (var p in paletteArray) s.Write(p);
                 int mipMapIndex = 0;
                 var start = fs.Position;
-                foreach (var mip in this.Mips)
+                foreach (var mip in Mips)
                 {
                     cmdOffsets[mipMapIndex++] = (uint)(fs.Position - start);
-                    foreach (var runList in GroupPixelRuns(mip.Runs))
+                    foreach (var runList in mip.Runs)
                     {
-                        if (runList.Length == 1 && runList[0].Length > 1)
-                            WritePixelRepeat(s, paletteLookup, runList[0]);
+                        if (runList.Length == 1)
+                            WritePixelRepeat(s, palette, runList[0]);
                         else
-                            WritePixelSequence(s, paletteLookup, runList);
+                            WritePixelSequence(s, palette, runList);
 
                     }
                 }
@@ -110,20 +142,20 @@ namespace LRLE
             private static void WritePixelRepeat(BinaryWriter s, Dictionary<int, int> palette, PixelRun run)
             {
                 var paletteIndex = palette.ContainsKey(run.Color) ? palette[run.Color] : -1;
-                var flag = paletteIndex < 0 ? 6 //Inline
-                    : paletteIndex <= byte.MaxValue ? 2 //Byte index
-                    : 4; //Short index
-                var runBytes = WritePackedInt(run.Length, flag, 3).ToArray();
+                var flag = paletteIndex < 0 ? 3 //Inline
+                    : paletteIndex <= byte.MaxValue ? 1 //Byte index
+                    : 2; //Short index
+                var runBytes = WritePackedInt(run.Length, flag << 1, 3).ToArray();
                 s.Write(runBytes);
                 switch (flag)
                 {
-                    case 2:
+                    case 1:
                         s.Write((byte)paletteIndex);
                         break;
-                    case 4:
+                    case 2:
                         s.Write((ushort)paletteIndex);
                         break;
-                    case 6:
+                    case 3:
                         s.Write(run.Color);
                         break;
                 }
@@ -131,17 +163,43 @@ namespace LRLE
 
             private static void WritePixelSequence(BinaryWriter s, Dictionary<int, int> palette, PixelRun[] runs)
             {
-                var flag = runs.Any(x => palette.ContainsKey(x.Color) == false) ? 3 : 1;
-                var runBytes = LRLEUtility.WritePackedInt(runs.Length, (byte)flag, 2).ToArray();
-                s.Write(runBytes);
-                foreach (var run in runs)
+                int i;
+                PixelRun run;
+                int flag, lastFlag = -1, lastIndex = 0;
+                for (i = 0; i < runs.Length; i++)
                 {
+                    run = runs[i];
+                    flag = palette.ContainsKey(run.Color) ? 0 : 1;
+                    if (lastFlag == -1)
+                    {
+                        lastFlag = flag;
+                        lastIndex = i;
+
+                    }
+                    else if (flag != lastFlag)
+                    {
+                        WritePixelSequence(s, palette, runs, lastIndex, i, lastFlag);
+
+                        lastFlag = flag;
+                        lastIndex = i;
+                    }
+
+                }
+                WritePixelSequence(s, palette, runs, lastIndex, i, lastFlag);
+            }
+            private static void WritePixelSequence(BinaryWriter s, Dictionary<int, int> palette, PixelRun[] runs, int start, int end, int flag)
+            {
+                var runBytes = WritePackedInt(end - start, 1 | (byte)flag << 1, 2).ToArray();
+                s.Write(runBytes);
+                for (int i = start; i < end; i++)
+                {
+                    var run = runs[i];
                     switch (flag)
                     {
-                        case 1:
+                        case 0:
                             s.Write(WritePackedInt(palette[run.Color], 0, 0).ToArray());
                             break;
-                        case 3:
+                        case 1:
                             s.Write(run.Color);
                             break;
                     }
@@ -149,21 +207,17 @@ namespace LRLE
             }
         }
 
-
         public class Reader
         {
-            private readonly Stream stream;
-            private long start;
-
-            internal Reader(Stream stream)
+            public byte[] MipData { get; private set; }
+            internal Reader()
             {
-                this.stream = stream;
                 this.Palette = new int[0];
             }
             internal static Reader FromStream(Stream s)
             {
-                var r = new Reader(s);
-                r.Init();
+                var r = new Reader();
+                r.Init(s);
                 return r;
             }
             public int[] Palette { get; private set; }
@@ -173,7 +227,7 @@ namespace LRLE
             public short Width { get; private set; }
             public short Height { get; private set; }
             public uint[] CommandOffsets { get; private set; }
-            void Init()
+            void Init(Stream stream)
             {
                 var s = new BinaryReader(stream);
                 if (s.ReadUInt32() != LRLE) throw new InvalidDataException("Not a LRLE Image");
@@ -189,38 +243,29 @@ namespace LRLE
                     this.Palette = new int[s.ReadInt32()];
                     for (int cc = 0; cc < Palette.Length; cc++) Palette[cc] = s.ReadInt32();
                 }
-                this.start = stream.Position;
+                this.MipData = new byte[stream.Length - stream.Position];
+                stream.Read(MipData, 0, MipData.Length);
             }
             public IEnumerable<Mip> Read()
             {
                 for (int i = 0; i < MipCount; i++)
                 {
-                    long start = this.start + CommandOffsets[i];
-                    stream.Position = start;
+                    long start = CommandOffsets[i];
                     long end = i == MipCount - 1 ?
-                        stream.Length :
-                        this.start + CommandOffsets[i + 1];
-                    var mip = new Mip(stream, i, Format, Palette, start, end)
+                        (uint)MipData.LongLength : CommandOffsets[i + 1];
+                    byte[] mipBytes = new byte[end - start];
+                    Array.Copy(MipData, start, mipBytes, 0, mipBytes.Length);
+                    var mip = new Mip(mipBytes, i, Format, Palette, start, end)
                     {
                         Width = Width >> i,
                         Height = Height >> i
                     };
                     yield return mip;
                 }
-                if (stream.Position != stream.Length) throw new InvalidDataException();
-            }
-            public class Chunk
-            {
-                public byte CommandByte { get; set; }
-                public List<PixelRun> Runs { get; set; } = new List<PixelRun>();
-                public void AddRun(int length, int color)
-                {
-                    this.Runs.Add(new PixelRun { Length = length, Color = color });
-                }
             }
             public class Mip
             {
-                private readonly Stream stream;
+                private readonly byte[] mipBytes;
                 private readonly LRLEFormat version;
                 private readonly int[] palette;
 
@@ -232,9 +277,9 @@ namespace LRLE
 
                 public int Index { get; }
 
-                public Mip(Stream stream, int index, LRLEFormat version, int[] palette, long start, long end)
+                public Mip(byte[] mipBytes, int index, LRLEFormat version, int[] palette, long start, long end)
                 {
-                    this.stream = stream;
+                    this.mipBytes = mipBytes;
                     this.version = version;
                     this.palette = palette;
 
@@ -247,80 +292,101 @@ namespace LRLE
                     var pixels = new byte[Width * Height << 2];
                     int pixelsWritten = 0;
                     byte[] color;
-                    foreach (var chunk in Read())
+                    foreach (var run in Read())
                     {
-                        foreach (var run in chunk.Runs)
-                        {
-                            color = BitConverter.GetBytes(run.Color);
-                            for (int j = 0; j < run.Length; j++)
-                                Array.Copy(color, 0, pixels, LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, Width) << 2, 4);
-                        }
+                        color = BitConverter.GetBytes(run.Color);
+                        for (int j = 0; j < run.Length; j++)
+                            Array.Copy(color, 0, pixels, LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, Width, Height) << 2, 4);
                     }
                     return pixels;
                 }
-                public IEnumerable<Chunk> Read()
+                public IEnumerable<PixelRun> Read()
                 {
-                    var s = new BinaryReader(stream);
-                    while (s.BaseStream.Position < End)
+                    using (var s = new BinaryReader(new MemoryStream(mipBytes)))
                     {
-                        switch (version)
+                        while (s.BaseStream.Position < s.BaseStream.Length)
                         {
-                            case LRLEFormat.Default:
-                                yield return Read0000Chunk(s);
-                                break;
-                            case LRLEFormat.V002:
-                                yield return ReadV002Chunk(s, palette);
-                                break;
+                            switch (version)
+                            {
+                                case LRLEFormat.Default:
+                                    foreach (var run in Read0000Chunk(s))
+                                        yield return run;
+                                    break;
+                                case LRLEFormat.V002:
+                                    foreach (var run in ReadV002Chunk(s, palette))
+                                        yield return run;
+                                    break;
+                            }
                         }
                     }
                 }
-                public Chunk Read0000Chunk(BinaryReader s)
+                public IEnumerable<PixelRun> Read0000Chunk(BinaryReader s)
                 {
                     var cmdLengthByte = s.ReadByte();
                     var cmdByte = cmdLengthByte & 3;
-                    var chunk = new Chunk { CommandByte = cmdLengthByte };
                     switch (cmdByte)
                     {
                         case 0:
-                            ReadBlankPixelRepeat(s, cmdLengthByte, chunk);
+                            yield return ReadBlankPixelRepeat(s, cmdLengthByte);
                             break;
                         case 1:
-                            ReadInlinePixelSequence(s, cmdLengthByte, chunk);
+                            foreach (var run in ReadInlinePixelSequence(s, cmdLengthByte))
+                                yield return run;
                             break;
                         case 2:
-                            ReadInlinePixelRepeat(s, cmdLengthByte, chunk);
+                            yield return ReadInlinePixelRepeat(s, cmdLengthByte);
                             break;
                         case 3:
-                            ReadEmbeddedRLE(s, cmdLengthByte, chunk);
+                            foreach (var run in ReadEmbeddedRLE(s, cmdLengthByte))
+                                yield return run;
                             break;
 
                     }
-                    return chunk;
                 }
 
-                private void ReadPixelSequence(BinaryReader s, int[] palette, List<byte> lengthBytes, byte cmdByte, Chunk chunk)
+                readonly byte[] ReadHighBitSequenceBuffer = new byte[10];
+                public byte[] ReadHighBitSequence(BinaryReader r, byte? start = null)
+                {
+                    int i = 0;
+                    byte b;
+                    if (start.HasValue)
+                    {
+                        if ((start.Value & 0x80) == 0)
+                            return new byte[] { start.Value };
+                        ReadHighBitSequenceBuffer[i++] = start.Value;
+                    }
+                    do
+                    {
+                        b = r.ReadByte();
+                        ReadHighBitSequenceBuffer[i++] = b;
+                    } while ((b & 0x80) != 0);
+                    byte[] rtnVal = new byte[i];
+                    Array.Copy(ReadHighBitSequenceBuffer, rtnVal, i);
+                    return rtnVal;
+                }
+
+                private IEnumerable<PixelRun> ReadPixelSequence(BinaryReader s, int[] palette, byte[] lengthBytes, byte cmdByte)
                 {
                     var count = ReadPackedInt(lengthBytes, 2);
                     var flags = (cmdByte & 3) >> 1;
                     var color = 0;
                     for (int j = 0; j < count; j++)
                     {
-
                         switch (flags)
                         {
                             case 0:
-                                color = palette[ReadPackedInt(ReadHighBitSequence(s), 0)];
+                                var ix = ReadPackedInt(ReadHighBitSequence(s), 0);
+                                color = palette[ix];
                                 break;
                             case 1:
                                 color = s.ReadInt32();
                                 break;
-
                         }
-                        chunk.AddRun(1, color);
+                        yield return new PixelRun(color, 1);
                     }
                 }
 
-                private void ReadPixelRepeat(BinaryReader s, int[] palette, List<byte> lengthBytes, byte cmdByte, Chunk chunk)
+                private PixelRun ReadPixelRepeat(BinaryReader s, int[] palette, byte[] lengthBytes, byte cmdByte)
                 {
                     var count = ReadPackedInt(lengthBytes, 3);
                     var flags = (cmdByte & 7) >> 1;
@@ -336,14 +402,13 @@ namespace LRLE
                         case 3:
                             color = s.ReadInt32();
                             break;
-
                     }
-                    chunk.AddRun(count, color);
+                    return new PixelRun(color, count);
                 }
-                private static void ReadEmbeddedRLE(BinaryReader s, byte lengthByte, Chunk chunk)
+                private IEnumerable<PixelRun> ReadEmbeddedRLE(BinaryReader s, byte lengthByte)
                 {
                     var count = lengthByte >> 2;
-                    var pixelBuffer = new byte[count<< 2];
+                    var pixelBuffer = new byte[count << 2];
                     var pixelPtr = 0;
                     while (pixelPtr < pixelBuffer.Length)
                     {
@@ -373,52 +438,54 @@ namespace LRLE
                     }
                     for (int i = 0; i < count; i++)
                     {
-                        chunk.AddRun(1, BitConverter.ToInt32(new byte[] {
-                            pixelBuffer[i],
-                            pixelBuffer[i+ count],
-                            pixelBuffer[i+ count + count],
-                            pixelBuffer[i+ count + count + count]
-                        }, 0));
+                        yield return new PixelRun(BitConverter.ToInt32(new byte[] {
+                                pixelBuffer[i],
+                                pixelBuffer[i+ count],
+                                pixelBuffer[i+ count + count],
+                                pixelBuffer[i+ count + count + count]
+                            }, 0)
+                        , 1);
 
                     }
                 }
 
-                private static void ReadInlinePixelSequence(BinaryReader s, byte lengthByte, Chunk chunk)
+                private static IEnumerable<PixelRun> ReadInlinePixelSequence(BinaryReader s, byte lengthByte)
                 {
                     var count = lengthByte >> 2;
                     for (int j = 0; j < count; j++)
                     {
-                        chunk.AddRun(1, s.ReadInt32());
+                        yield return new PixelRun(s.ReadInt32(), 1);
                     }
                 }
 
-                private static void ReadInlinePixelRepeat(BinaryReader s, byte lengthByte, Chunk chunk)
+                private PixelRun ReadInlinePixelRepeat(BinaryReader s, byte lengthByte)
                 {
-                    chunk.AddRun(ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2), s.ReadInt32());
+                    int len = ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2);
+                    int color = s.ReadInt32();
+                    return new PixelRun(color, len);
                 }
 
-                private static void ReadBlankPixelRepeat(BinaryReader s, byte lengthByte, Chunk chunk)
+                private PixelRun ReadBlankPixelRepeat(BinaryReader s, byte lengthByte)
                 {
-                    chunk.AddRun(ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2), 0);
+                    int len = ReadPackedInt(ReadHighBitSequence(s, lengthByte), 2);
+                    return new PixelRun(0, len);
                 }
 
-                Chunk ReadV002Chunk(BinaryReader s, int[] palette)
+                IEnumerable<PixelRun> ReadV002Chunk(BinaryReader s, int[] palette)
                 {
-
-                    var lengthBytes = ReadHighBitSequence(s).ToList();
+                    var lengthBytes = ReadHighBitSequence(s);
                     var cmdByte = lengthBytes[0];
                     var commandType = cmdByte & 1;
-                    var chunk = new Chunk { CommandByte = cmdByte };
                     switch (commandType)
                     {
                         case 0:
-                            ReadPixelRepeat(s, palette, lengthBytes, cmdByte, chunk);
+                            yield return ReadPixelRepeat(s, palette, lengthBytes, cmdByte);
                             break;
                         case 1:
-                            ReadPixelSequence(s, palette, lengthBytes, cmdByte, chunk);
+                            foreach (var run in ReadPixelSequence(s, palette, lengthBytes, cmdByte))
+                                yield return run;
                             break;
                     }
-                    return chunk;
                 }
             }
         }
@@ -429,21 +496,6 @@ namespace LRLE
         public static Reader GetReader(Stream s)
         {
             return Reader.FromStream(s);
-        }
-        public static IEnumerable<byte> ReadHighBitSequence(BinaryReader r, byte? start = null)
-        {
-            byte b;
-            if (start.HasValue)
-            {
-                yield return start.Value;
-                if ((start.Value & 0x80) == 0)
-                    yield break;
-            }
-            do
-            {
-                b = r.ReadByte();
-                yield return b;
-            } while ((b & 0x80) != 0);
         }
         public static IEnumerable<byte> WritePackedInt(int number, int flag, int startBit)
         {
@@ -466,13 +518,13 @@ namespace LRLE
             u >>= startBit;
             return (int)u;
         }
-
-        public static int BlockIndexToScanlineIndex(int block_index, int width)
+        public static int BlockIndexToScanlineIndex(int block_index, int width, int height)
         {
             var block_row_size = width << 2;
+            int block_total_index = block_index & (block_row_size - 1);
 
             int block_row = block_index / block_row_size;
-            int block_column = block_index % block_row_size >> 4;
+            int block_column = block_total_index >> 4;
 
             int block_index_row = (block_index >> 2) & 3;
             int block_index_column = block_index & 3;
@@ -482,37 +534,6 @@ namespace LRLE
             int scanline_index = (scanline_row * width) + scanline_column;
             return scanline_index;
 
-        }
-        public static List<PixelRun> ExtractPixelRuns(byte[] argbPixels, int width)
-        {
-            int? lastColor = null;
-            int runLength = 0;
-            var runs = new List<PixelRun>();
-            var pixels = argbPixels.Length >> 2;
-            for (int i = 0; i < pixels; i++)
-            {
-                var index = BlockIndexToScanlineIndex(i, width);
-
-                var c = BitConverter.ToInt32(argbPixels, index << 2);
-                if (lastColor == null)
-                {
-                    lastColor = c;
-                    runLength++;
-                }
-                else if (lastColor == c)
-                {
-                    runLength++;
-                }
-                else
-                {
-                    runs.Add(new PixelRun { Color = lastColor.Value, Length = runLength });
-                    lastColor = c;
-                    runLength = 0;
-                    runLength++;
-                }
-            }
-            runs.Add(new PixelRun { Color = lastColor.Value, Length = runLength });
-            return runs;
         }
     }
 }
