@@ -1,4 +1,5 @@
-﻿using Xunit;
+﻿using System.IO;
+using Xunit;
 using static LRLE.LRLEUtility;
 namespace LRLETests
 {
@@ -11,16 +12,25 @@ namespace LRLETests
         [InlineData(new byte[] { 0x00 }, 0, 0, 0)]
         public void TestWritePackedInt(byte[] expectedBytes, int command, int count, int startBit)
         {
-            var result = WritePackedInt(count, command, startBit);
-            Assert.Equal(expectedBytes, result);
+            using (var ms = new MemoryStream())
+            using (var s = new BinaryWriter(ms))
+            {
+                WritePackedInt(count, command, startBit, s);
+                var result = ms.ToArray();
+                Assert.Equal(expectedBytes, result);
+            }
         }
         [Theory]
         [InlineData(new byte[] { 0xDA, 0x90, 0x05, }, 10507, 3)]
         [InlineData(new byte[] { 0x12, }, 2, 3)]
-        public void TestReadPackedInt(byte[] bytes, int expectedCount, int startBit)
+        public void TestReadPackedInt(byte[] bytes, int expectedCount, byte startBit)
         {
-            var result = ReadPackedInt(bytes, startBit);
-            Assert.Equal(expectedCount, result);
+            using (var ms = new MemoryStream(bytes))
+            using (var br = new BinaryReader(ms))
+            {
+                var result = ReadPackedInt(br)>>startBit;
+                Assert.Equal(expectedCount,(int)result);
+            }
         }
 
         [Theory]
@@ -44,7 +54,7 @@ namespace LRLETests
         [InlineData(128, (128 * 4) + 1, (4 * 128) + (0 * 4) + 1)]
         public void TestBlockIndexToScanLineIndex(int width, int block_index, int scanline_index)
         {
-            Assert.Equal(scanline_index, BlockIndexToScanlineIndex(block_index, width, width));
+            Assert.Equal(scanline_index, BlockIndexToScanlineIndex(block_index, width, width << 2, Log2(width)));
         }
     }
 }

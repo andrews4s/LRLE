@@ -9,16 +9,17 @@ using LRLE;
 using Microsoft.Extensions.Configuration;
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
+using System.Runtime;
 
 namespace LREParser
 {
     class MainClass
     {
         static string outDir = "out";
-        static bool logText = false;
         static bool roundtrip = false;
         static bool saveMips = false;
         static int maxMips = 12;
+        static bool fast = false;
 
         static string[] extensions = new[] { ".lrle", ".png" };
         public static void Main(string[] args)
@@ -38,7 +39,8 @@ namespace LREParser
             }
 
             ParseCommandLineOptions(args);
-
+            GC.Collect(2);
+            GCSettings.LatencyMode = GCLatencyMode.LowLatency;
             using (Timer("All files"))
             {
                 foreach (var lrle in files)
@@ -65,7 +67,7 @@ namespace LREParser
         private static void ProcessLRLE(string inputFile, string outputFile, bool convertBack)
         {
             var inputCopyDest = Path.Combine(Path.GetDirectoryName(outputFile), Path.GetFileName(inputFile));
-            if(inputCopyDest != inputFile)File.Copy(inputFile, inputCopyDest);
+            if (inputCopyDest != inputFile) File.Copy(inputFile, inputCopyDest);
             if (Path.GetExtension(inputFile) == ".png")
             {
                 using (Timer($"Convert input {Path.GetFileName(inputFile)} to LRLE"))
@@ -80,43 +82,55 @@ namespace LREParser
             {
                 var lrleReader = LRLEUtility.GetReader(fs);
                 var lrleWriter = LRLEUtility.GetWriter();
-                if (logText) WritePaletteText(outputFile, lrleReader);
-
+                Bitmap[] bitmaps = new Bitmap[lrleReader.MipCount];
                 using (Timer("All mipmaps decoded"))
                 {
+
                     foreach (var mip in lrleReader.Read().Take(maxMips))
                     {
                         Bitmap bmp;
                         using (Timer($"Decoding mip {mip.Index}"))
                         {
-                            bmp = ExtractMipMapData(outputFile, mip);
+                            bmp = ExtractMipMapData(mip);
                         }
+                        bitmaps[mip.Index] = bmp;
+                    }
+                }
+                using (Timer("All mip maps saved"))
+                {
+                    for (int i = 0; i < bitmaps.Length; i++)
+                    {
+                        var bmp = bitmaps[i];
                         if (saveMips)
                         {
-                            using (Timer($"Saving mip {mip.Index}"))
+                            using (Timer($"Saving mip {i}"))
                             {
-                                bmp.Save(outputFile + $".mip{mip.Index}.png");
+                                bmp.Save(outputFile + $".mip{i}.png");
                             }
                         }
-                        else if (mip.Index == 0)
+                        else if (i == 0)
                         {
                             using (Timer($"Saving first mip"))
                             {
                                 bmp.Save(outputFile + $".png");
                             }
                         }
-                        
-                        if (convertBack)
-                        {
-                            using (Timer($"Extracting pixels from decoded mip {mip.Index}"))
-                            {
-                                lrleWriter.AddMip(mip.Width, mip.Height, GetPixelData(bmp));
-                            }
-                        }
                     }
                 }
                 if (convertBack)
                 {
+                    using (Timer($"All mip data extracted for re-encode"))
+                    {
+                        for (int i = 0; i < lrleReader.MipCount; i++)
+                        {
+                            var bmp = bitmaps[i];
+                            using (Timer($"Extracting pixels from decoded mip {i}"))
+                            {
+                                lrleWriter.AddMip(bmp.Width, bmp.Height, GetPixelData(bmp));
+                            }
+                        }
+
+                    }
                     var outFile = outputFile + $".out";
                     //Re-encode the pixel runs as a new lrle file
                     ReEncode(lrleWriter, outFile);
@@ -132,49 +146,57 @@ namespace LREParser
             {
                 var bmp = (Bitmap)Image.FromFile(inputFile);
                 var encoder = LRLEUtility.GetWriter();
-                int mip = 0;
                 int w = bmp.Width;
                 int h = bmp.Height;
-                Bitmap mipBmp = bmp;
-                do
+                List<Bitmap> bitmaps = new List<Bitmap>();
+                using (Timer("All mips resized"))
                 {
-                    int mipWidth = w >> mip;
-                    int mipHeight = h >> mip;
-                    using (Timer($"Encoding mip {mip}"))
+                    int mip = 0;
+                    Bitmap mipBmp = bmp;
+                    do
                     {
-                        byte[] bytes;
-                        using (Timer($"Extracting bitmap pixels"))
+                        int mipWidth = w >> mip;
+                        int mipHeight = h >> mip;
+                        using (Timer($"Resizing mip {mip}"))
                         {
-                            using (Timer($"Resizing mip map"))
+                            if (w != mipWidth || h != mipHeight)
                             {
-                                if (w != mipWidth || h != mipHeight)
+                                mipBmp = new Bitmap(w >> mip, h >> mip);
+                                mipBmp.SetResolution(bmp.HorizontalResolution, bmp.VerticalResolution);
+                                using (var g = Graphics.FromImage(mipBmp))
                                 {
-                                    mipBmp = new Bitmap(w >> mip, h >> mip);
-                                    mipBmp.SetResolution(bmp.HorizontalResolution, bmp.VerticalResolution);
-                                    using (var g = Graphics.FromImage(mipBmp))
+                                    if (!fast)
                                     {
                                         g.CompositingMode = CompositingMode.SourceCopy;
                                         g.CompositingQuality = CompositingQuality.HighQuality;
                                         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                                         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                                         g.SmoothingMode = SmoothingMode.HighQuality;
-                                        g.DrawImage(bmp, new Rectangle(0, 0, mipBmp.Width, mipBmp.Height));
                                     }
+                                    g.DrawImage(bmp, new Rectangle(0, 0, mipBmp.Width, mipBmp.Height));
                                 }
                             }
-                            var bits = mipBmp.LockBits(new Rectangle(0, 0, mipBmp.Width, mipBmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-                            bytes = new byte[mipBmp.Width * mipBmp.Height << 2];
-                            Marshal.Copy(bits.Scan0, bytes, 0, bytes.Length);
-                            mipBmp.UnlockBits(bits);
                         }
-                        using (Timer($"Extracting pixel runs"))
-                        {
-                            encoder.AddMip(mipBmp.Width, mipBmp.Height, bytes);
-                        }
+                        bitmaps.Add(mipBmp);
                         mip++;
                     }
+                    while (mipBmp.Width >= 8 && mipBmp.Height >= 8);
                 }
-                while (mipBmp.Width >= 8 && mipBmp.Height >= 8);
+                using (Timer($"Extracted all pixel runs"))
+                { 
+                    int mip = 0;
+                    foreach (var b in bitmaps)
+                    {
+                        using (Timer($"Extracting mip {mip++} pixel runs"))
+                        {
+                            var bits = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                            byte[] bytes = new byte[b.Width * b.Height << 2];
+                            Marshal.Copy(bits.Scan0, bytes, 0, bytes.Length);
+                            b.UnlockBits(bits);
+                            encoder.AddMip(b.Width, b.Height, bytes);
+                        }
+                    }
+                }
                 using (Timer("Writing LRLE"))
                     encoder.Write(fs);
             }
@@ -203,37 +225,15 @@ namespace LREParser
             }
         }
 
-
-        private static Bitmap ExtractMipMapData(string outputFile, LRLEUtility.Reader.Mip mip)
+        private static Bitmap ExtractMipMapData(LRLEUtility.Reader.Mip mip)
         {
-            byte[] color = null;
-            StreamWriter mipText = null;
-            if (logText) mipText = File.CreateText(outputFile + $".mip{mip.Index}.txt");
-
-
             var bmp = new Bitmap(mip.Width, mip.Height);
-            var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            if (logText)
-            {
-                mipText.WriteLine($"{mip.Start:X16} - {mip.End:X16}");
-                mipText.WriteLine($"Mip [{mip.Index}] {mip.Width}x{mip.Height}={(mip.Width * mip.Height):X8}|{mip.Width * mip.Height} ({mip.Length})");
-            }
-            var pixels = new byte[mip.Width * mip.Height << 2];
-            int pixelsWritten = 0;
-
-            foreach (var run in mip.Read())
-            {
-                if (saveMips || logText || mip.Index == 0) color = BitConverter.GetBytes(run.Color);
-                if (logText) mipText.WriteLine($"{FormatColor(run.Color)} * {run.Length} {Convert.ToString(run.Length, 2)}");
-                if (saveMips || mip.Index == 0) for (int j = 0; j < run.Length; j++) Array.Copy(color, 0, pixels, LRLEUtility.BlockIndexToScanlineIndex(pixelsWritten++, mip.Width, mip.Height) << 2, 4);
-                if (logText) mipText.Flush();
-            }
-            if (logText) mipText.Close();
             if (saveMips || mip.Index == 0)
             {
-                Marshal.Copy(pixels, 0, bits.Scan0, pixels.Length);
+                var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                mip.Read(bits.Scan0);
+                bmp.UnlockBits(bits);
             }
-            bmp.UnlockBits(bits);
             return bmp;
 
         }
@@ -260,21 +260,7 @@ namespace LREParser
                 {
                     this.stopwatch.Stop();
                 }
-                Console.WriteLine($"{subject} finished in {(stopwatch.ElapsedMilliseconds) / 1000.0} s");
-            }
-        }
-
-        private static void WritePaletteText(string outputFile, LRLEUtility.Reader lrleReader)
-        {
-            if (lrleReader.Palette.Any())
-            {
-                using (var paletteTextWriter = File.CreateText(outputFile + ".palette.txt"))
-                {
-                    for (int cc = 0; cc < lrleReader.Palette.Length; cc++)
-                    {
-                        paletteTextWriter.WriteLine($"{cc}\t{cc.ToString("X4")}\t{FormatColor(lrleReader.Palette[cc])}");
-                    }
-                }
+                Console.WriteLine($"{subject} finished in {(stopwatch.ElapsedMilliseconds / 1000.0)} s");
             }
         }
 
@@ -285,9 +271,9 @@ namespace LREParser
                 .Build();
             outDir = conf[nameof(outDir)] ?? "out";
             maxMips = int.Parse(conf[nameof(maxMips)] ?? "10");
-            logText = (conf[nameof(logText)] ?? "false").ToLower() == "true";
             roundtrip = (conf[nameof(roundtrip)] ?? "false").ToLower() == "true";
             saveMips = (conf[nameof(saveMips)] ?? "false").ToLower() == "true";
+            fast = (conf[nameof(fast)] ?? "false").ToLower() == "true";
         }
 
         private static string GetInputPath(string[] args)
