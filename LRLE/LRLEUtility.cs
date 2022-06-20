@@ -30,17 +30,100 @@ namespace LRLE
                 public int Height { get; set; }
             }
             public List<Mip> Mips { get; set; } = new List<Mip>();
+            /// <summary>
+            /// 0 will allow inline pixels in all mip levels. Otherwise it forces mip maps below that level to use the palette.
+            /// </summary>
+            public int MinInlinePixelMipLevel { get; set; } = 0;
+            /// <summary>
+            /// When forcing a pixel into the palette, this is the base ARGB distance allowed
+            /// </summary>
+            public int PaletteMatchBaseDifference { get; set; } = 10;
+            /// <summary>
+            /// When forcing a pixel into the palette, this is the increased ARGB distance allowed per mip level.
+            /// </summary>
+            public int PaletteMatchDifferencePerMipLevel { get; set; } = 8;
 
             readonly IDictionary<int, int> paletteOccurrences = new Dictionary<int, int>(ushort.MaxValue);
+            private List<int> paletteArray = new List<int>();
+            private Dictionary<int, int> palette = new Dictionary<int, int>();
+
             public void AddMip(int width, int height, byte[] rawARGBPixelData)
             {
                 this.Mips.Add(new Mip { Width = width, Height = height, Runs = ExtractPixelRuns(rawARGBPixelData, width, height) });
+                //Determine if settings allow this mip level to use inline pixels.
+                var disallowInlinePixel = this.Mips.Count <= this.MinInlinePixelMipLevel;
+                //Determine the maximum difference allowed for a palette match at thi mip level.
+                var maxDiff = this.PaletteMatchBaseDifference + (PaletteMatchDifferencePerMipLevel * Mips.Count);
+                foreach (var colorOccurrence in paletteOccurrences.OrderByDescending(x => x.Value).ToArray()
+                    )
+                {
+                    //If the palette is full and this mip level does not require a palette match, break.
+                    if (!disallowInlinePixel && paletteArray.Count >= ushort.MaxValue)
+                        break;
+                    //If an exact match exists in the palette, move along.
+                    if (palette.ContainsKey(colorOccurrence.Key))
+                        continue;
+                    //If there is room in the palette, add this color.
+                    if (paletteArray.Count < ushort.MaxValue)
+                    {
+                        this.palette[colorOccurrence.Key] = paletteArray.Count;
+                        this.paletteArray.Add(colorOccurrence.Key);
+                        //Now that this color made it into the palette, we don't need to check it.
+                        paletteOccurrences.Remove(colorOccurrence.Key);
+                    }
+                    else
+                    {
+                        //Find an appropriate color within the filled palette for this pixel at this mip level.
+                        int newColor = -1;
+                        int best = int.MaxValue;
+                        int i = 0;
+                        for (i = 0; i < paletteArray.Count; i++)
+                        {
+
+                            var c = paletteArray[i];
+                            int diff = CompareColor(c, colorOccurrence.Key, best);
+                            if (diff < best)
+                            {
+                                best = diff;
+                                newColor = c;
+                            }
+                            if (best <= maxDiff)
+                            {
+                                break;
+                            }
+                        }
+                        palette[colorOccurrence.Key] = palette[newColor];
+                    }
+
+                }
+            }
+            /// <summary>
+            /// Determines how close 2 colors are.
+            /// </summary>
+            int CompareColor(int a, int b, int best)
+            {
+                var c1 = (int)(((a & 0xFF000000) >> 24) - ((b & 0xFF000000) >> 24));
+                if (c1 < 0) c1 = -c1;
+                if (c1 > best) return int.MaxValue;
+
+                var c2 = ((a & 0x00FF0000) >> 16) - ((b & 0x00FF0000) >> 16);
+                if (c2 < 0) c2 = -c2;
+                if (c2 > best) return int.MaxValue;
+
+                var c3 = ((a & 0x0000FF00) >> 8) - ((b & 0x0000FF00) >> 8);
+                if (c3 < 0) c3 = -c3;
+                if (c3 > best) return int.MaxValue;
+
+                var c4 = (a & 0x000000FF) - (b & 0x000000FF);
+                if (c4 < 0) c4 = -c4;
+
+                return c1 + c2 + c3 + c4;
             }
             internal List<PixelRun[]> ExtractPixelRuns(byte[] argbPixels, int width, int height)
             {
                 int lastColor = 0;
                 int runLength = 0;
-                var allRuns = new List<PixelRun[]>((width*height)>>4);
+                var allRuns = new List<PixelRun[]>(0x80000);
                 var runList = new PixelRun[255];
                 PixelRun[] l;
                 int listLength = 0;
@@ -117,21 +200,10 @@ namespace LRLE
                 var s = new BinaryWriter(fs);
                 var mipCount = this.Mips.Count;
                 var headerSize = 16 + (mipCount << 2);
-                var paletteArray =
-                    paletteOccurrences
-                    .OrderByDescending(x => x.Value)
-                    .Take(ushort.MaxValue)
-                    .Select(x => x.Key)
-                    .ToArray();
-                var palette =
-                    Enumerable
-                        .Range(0, paletteArray.Length)
-                        .ToDictionary(x => paletteArray[x], x => x);
-
                 s.Seek(headerSize, SeekOrigin.Begin);
-                s.Write(paletteArray.Length);
+                s.Write(paletteArray.Count);
                 var cmdOffsets = new uint[mipCount];
-                for (int i = 0; i < paletteArray.Length; i++)
+                for (int i = 0; i < paletteArray.Count; i++)
                 {
                     int p = paletteArray[i];
                     s.Write(p);
