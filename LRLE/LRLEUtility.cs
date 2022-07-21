@@ -159,13 +159,14 @@ namespace LRLE
                 return r;
             }
             public LRLEFormat Format { get; private set; }
-            public int MipCount { get; private set; }
+            public int MipCount => this.MipMaps.Count;
             public short Width { get; private set; }
             public short Height { get; private set; }
             public LRLECodec Codec { get; private set; }
+            public long MipDataStart { get; private set; }
+            public long MipDataEnd { get; private set; }
+            public List<Mip> MipMaps { get; private set; } = new List<Mip>();
 
-            private uint[] commandOffsets;
-            private byte[] mipData;
 
             void Init(Stream stream)
             {
@@ -175,44 +176,42 @@ namespace LRLE
                 this.Codec = LRLECodec.Create(this.Format);
                 this.Width = s.ReadInt16();
                 this.Height = s.ReadInt16();
-                this.MipCount = s.ReadInt32();
-                this.commandOffsets = new uint[MipCount];
-                for (int i = 0; i < MipCount; i++) commandOffsets[i] = s.ReadUInt32();
+                var mipCount = s.ReadInt32();
+                var commandOffsets = new uint[mipCount];
+                for (int i = 0; i < mipCount; i++) commandOffsets[i] = s.ReadUInt32();
                 this.Codec.BeginRead(this, s);
-                this.mipData = new byte[stream.Length - stream.Position];
-                stream.Read(mipData, 0, mipData.Length);
-            }
-            public IEnumerable<Mip> Read()
-            {
-                for (int i = 0; i < MipCount; i++)
+                this.MipDataStart = stream.Position;
+                this.MipDataEnd = stream.Length;
+
+                for (int i = 0; i < mipCount; i++)
                 {
-                    long start = commandOffsets[i];
-                    long end = i == MipCount - 1 ?
-                        (uint)mipData.LongLength : commandOffsets[i + 1];
-                    byte[] mipBytes = new byte[end - start];
-                    Array.Copy(mipData, start, mipBytes, 0, mipBytes.Length);
-                    yield return new Mip(mipBytes, i, this, start, end, Width >> i, Height >> i);
+                    long start = commandOffsets[i] + this.MipDataStart;
+                    long end = i == mipCount - 1 ?
+                        (uint)this.MipDataEnd : commandOffsets[i + 1] + this.MipDataStart;
+                    this.MipMaps.Add(new Mip(i, this, start, end, Width >> i, Height >> i));
                 }
             }
 
-            public byte[] GetMipPixels(Mip mip)
+            public byte[] GetMipPixels(Mip mip, Stream source)
             {
                 var pixels = new byte[Width * Height << 2];
                 var ptr = GCHandle.Alloc(pixels, GCHandleType.Pinned);
-                ReadMip(ptr.AddrOfPinnedObject(), mip);
+                ReadMip(ptr.AddrOfPinnedObject(), mip, source);
                 ptr.Free();
                 return pixels;
             }
-            public unsafe void ReadMip(IntPtr pixels, Mip mip)
+            public unsafe void ReadMip(IntPtr pixels, Mip mip, Stream source)
             {
-                using (var s = new BinaryReader(new MemoryStream(mip.RawBytes)))
+                var s = new BinaryReader(source);
+
+                s.BaseStream.Position = mip.Start;
+                while (s.BaseStream.Position < mip.End)
                 {
                     this.Codec.Read(s, (int*)pixels, mip);
                 }
             }
             public class Mip
             {
-                private readonly byte[] mipBytes;
                 private readonly Reader reader;
                 private readonly int blockRowSize;
                 private readonly int widthLog2;
@@ -224,7 +223,6 @@ namespace LRLE
                 public long Start { get; }
                 public long End { get; }
                 public int Index { get; }
-                public byte[] RawBytes => this.mipBytes;
 
                 public long Length => End - Start;
 
@@ -237,20 +235,19 @@ namespace LRLE
                     pixelsRead += count;
                 }
 
-                public byte[] GetPixels()
+                public byte[] GetPixels(Stream source)
                 {
-                    return this.reader.GetMipPixels(this);
+                    return this.reader.GetMipPixels(this, source);
                 }
 
-                public void Read(IntPtr pixels)
+                public void Read(IntPtr pixels, Stream source)
                 {
-                    this.reader.ReadMip(pixels, this);
+                    this.reader.ReadMip(pixels, this, source);
                 }
 
-                public Mip(byte[] mipBytes, int index, Reader reader, long start, long end, int width, int height)
+                public Mip(int index, Reader reader, long start, long end, int width, int height)
                 {
                     this.reader = reader;
-                    this.mipBytes = mipBytes;
 
                     this.Width = width;
                     this.Height = height;
@@ -352,72 +349,70 @@ namespace LRLE
             }
             public override unsafe void Read(BinaryReader s, int* pixels, Reader.Mip mip)
             {
-                while (s.BaseStream.Position < s.BaseStream.Length)
+                var cmdByte = s.ReadByte();
+                int len;
+                switch (cmdByte & 3)
                 {
-                    var cmdByte = s.ReadByte();
-                    int len;
-                    switch (cmdByte & 3)
-                    {
-                        case 0: //Blank pixel repeat
-                            len = (int)(ReadPackedInt(s, cmdByte) >> 2);
-                            mip.WritePixel(len);
-                            break;
-                        case 1: //Inline pixel sequence
-                            len = cmdByte >> 2;
-                            for (int j = 0; j < len; j++)
+                    case 0: //Blank pixel repeat
+                        len = (int)(ReadPackedInt(s, cmdByte) >> 2);
+                        mip.WritePixel(len);
+                        break;
+                    case 1: //Inline pixel sequence
+                        len = cmdByte >> 2;
+                        for (int j = 0; j < len; j++)
+                        {
+                            mip.WritePixel(pixels, s.ReadInt32());
+                        }
+                        break;
+                    case 2: //Inline pixel repeat
+                        len = (int)(ReadPackedInt(s, cmdByte) >> 2);
+                        int color = s.ReadInt32();
+                        for (int i = 0; i < len; i++)
+                        {
+                            mip.WritePixel(pixels, color);
+                        }
+                        break;
+                    case 3: //Embedded RLE
+                        len = cmdByte >> 2;
+                        var pixelBuffer = new byte[len << 2];
+                        var pixelPtr = 0;
+                        while (pixelPtr < pixelBuffer.Length)
+                        {
+                            var cmd = ReadPackedInt(s);
+                            if ((cmd & 1) != 0)
                             {
-                                mip.WritePixel(pixels, s.ReadInt32());
+                                var byteCount = (int)(cmd >> 1);
+                                s.Read(pixelBuffer, pixelPtr, byteCount);
+                                pixelPtr += byteCount;
                             }
-                            break;
-                        case 2: //Inline pixel repeat
-                            len = (int)(ReadPackedInt(s, cmdByte) >> 2);
-                            int color = s.ReadInt32();
-                            for (int i = 0; i < len; i++)
+                            else if ((cmd & 2) != 0)
                             {
-                                mip.WritePixel(pixels, color);
-                            }
-                            break;
-                        case 3: //Embedded RLE
-                            len = cmdByte >> 2;
-                            var pixelBuffer = new byte[len << 2];
-                            var pixelPtr = 0;
-                            while (pixelPtr < pixelBuffer.Length)
-                            {
-                                var cmd = ReadPackedInt(s);
-                                if ((cmd & 1) != 0)
+                                var repeatCount = (int)(cmd >> 2);
+                                var b = s.ReadByte();
+                                for (int j = 0; j < repeatCount; j++)
                                 {
-                                    var byteCount = (int)(cmd >> 1);
-                                    s.Read(pixelBuffer, pixelPtr, byteCount);
-                                    pixelPtr += byteCount;
-                                }
-                                else if ((cmd & 2) != 0)
-                                {
-                                    var repeatCount = (int)(cmd >> 2);
-                                    var b = s.ReadByte();
-                                    for (int j = 0; j < repeatCount; j++)
-                                    {
-                                        pixelBuffer[pixelPtr++] = b;
-                                    }
-                                }
-                                else
-                                {
-                                    pixelPtr += (int)(cmd >> 2);
+                                    pixelBuffer[pixelPtr++] = b;
                                 }
                             }
-                            int startA = 0, startB = len, startC = startB + len, startD = startC + len;
-                            while (startA < len)
+                            else
                             {
-                                mip.WritePixel(pixels, BitConverter.ToInt32(new byte[] {
+                                pixelPtr += (int)(cmd >> 2);
+                            }
+                        }
+                        int startA = 0, startB = len, startC = startB + len, startD = startC + len;
+                        while (startA < len)
+                        {
+                            mip.WritePixel(pixels, BitConverter.ToInt32(new byte[] {
                                         pixelBuffer[startA++],
                                         pixelBuffer[startB++],
                                         pixelBuffer[startC++],
                                         pixelBuffer[startD++]
                                     }, 0));
-                            }
-                            break;
-                        default:
-                            throw new NotSupportedException($"Unknown command {cmdByte & 3}");
-                    }
+                        }
+                        break;
+                    default:
+                        throw new NotSupportedException($"Unknown command {cmdByte & 3}");
+
                 }
             }
             private static void WritePixelRepeat(BinaryWriter s, PixelRun run)
@@ -586,58 +581,55 @@ namespace LRLE
 
             public unsafe override void Read(BinaryReader s, int* pixels, Reader.Mip mip)
             {
-                while (s.BaseStream.Position < s.BaseStream.Length)
+                var cmdByte = ReadPackedInt(s);
+                var commandType = cmdByte & 1;
+                int count, flags, color;
+                switch (commandType)
                 {
-                    var cmdByte = ReadPackedInt(s);
-                    var commandType = cmdByte & 1;
-                    int count, flags, color;
-                    switch (commandType)
-                    {
-                        case 0: //Pixel repeat
-                            count = (int)(cmdByte >> 3);
-                            flags = ((int)cmdByte & 7) >> 1;
+                    case 0: //Pixel repeat
+                        count = (int)(cmdByte >> 3);
+                        flags = ((int)cmdByte & 7) >> 1;
+                        switch (flags)
+                        {
+                            case 1://8bit packed index
+                                color = Palette[s.ReadByte()];
+                                break;
+                            case 2://16bit packed index
+                                color = Palette[s.ReadUInt16()];
+                                break;
+                            case 3://Inline color
+                                this.HasInlinePixels = true;
+                                color = s.ReadInt32();
+                                break;
+                            default:
+                                throw new NotSupportedException($"Unknown V002 pixel repeat flags {flags}");
+                        }
+                        for (int i = 0; i < count; i++)
+                        {
+                            mip.WritePixel(pixels, color);
+                        }
+                        break;
+                    case 1: //Pixel sequence
+                        count = (int)(cmdByte >> 2);
+                        flags = ((int)cmdByte & 3) >> 1;
+                        for (int j = 0; j < count; j++)
+                        {
                             switch (flags)
                             {
-                                case 1://8bit packed index
-                                    color = Palette[s.ReadByte()];
+                                case 0: //Packed index
+                                    color = Palette[(int)ReadPackedInt(s)];
                                     break;
-                                case 2://16bit packed index
-                                    color = Palette[s.ReadUInt16()];
-                                    break;
-                                case 3://Inline color
-                                    this.HasInlinePixels = true;
+                                case 1: //Inline
                                     color = s.ReadInt32();
                                     break;
                                 default:
-                                    throw new NotSupportedException($"Unknown V002 pixel repeat flags {flags}");
+                                    throw new NotSupportedException($"Unknown pixel sequence flags {flags}");
                             }
-                            for (int i = 0; i < count; i++)
-                            {
-                                mip.WritePixel(pixels, color);
-                            }
-                            break;
-                        case 1: //Pixel sequence
-                            count = (int)(cmdByte >> 2);
-                            flags = ((int)cmdByte & 3) >> 1;
-                            for (int j = 0; j < count; j++)
-                            {
-                                switch (flags)
-                                {
-                                    case 0: //Packed index
-                                        color = Palette[(int)ReadPackedInt(s)];
-                                        break;
-                                    case 1: //Inline
-                                        color = s.ReadInt32();
-                                        break;
-                                    default:
-                                        throw new NotSupportedException($"Unknown pixel sequence flags {flags}");
-                                }
-                                mip.WritePixel(pixels, color);
-                            }
-                            break;
-                        default:
-                            throw new NotSupportedException($"Unknown command {commandType}");
-                    }
+                            mip.WritePixel(pixels, color);
+                        }
+                        break;
+                    default:
+                        throw new NotSupportedException($"Unknown command {commandType}");
                 }
             }
 

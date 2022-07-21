@@ -86,12 +86,12 @@ namespace LREParser
                 using (Timer("All mipmaps decoded"))
                 {
 
-                    foreach (var mip in lrleReader.Read().Take(maxMips))
+                    foreach (var mip in lrleReader.MipMaps.Take(maxMips))
                     {
                         Bitmap bmp;
                         using (Timer($"Decoding mip {mip.Index}"))
                         {
-                            bmp = ExtractMipMapData(mip);
+                            bmp = ExtractMipMapData(mip,fs);
                         }
                         bitmaps[mip.Index] = bmp;
                     }
@@ -225,13 +225,13 @@ namespace LREParser
             }
         }
 
-        private static Bitmap ExtractMipMapData(LRLEUtility.Reader.Mip mip)
+        private static Bitmap ExtractMipMapData(LRLEUtility.Reader.Mip mip, Stream source)
         {
             var bmp = new Bitmap(mip.Width, mip.Height);
             if (saveMips || mip.Index == 0)
             {
                 var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-                mip.Read(bits.Scan0);
+                mip.Read(bits.Scan0,source);
                 bmp.UnlockBits(bits);
             }
             return bmp;
