@@ -1,19 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using LRLE;
 using Microsoft.Extensions.Configuration;
-using System.Drawing.Imaging;
-using System.Drawing.Drawing2D;
 using System.Runtime;
+using SkiaSharp;
+using LRLETestApp;
 
 namespace LREParser
 {
-    class MainClass
+    partial class MainClass
     {
         static string outDir = "out";
         static bool roundtrip = false;
@@ -56,13 +54,9 @@ namespace LREParser
         static string FormatColor(int c) => FormatColor((uint)c);
         static string FormatColor(uint c) => $"#{c & 0x00FFFFFF:X6}{(c >> 24):X2}";
 
-        static byte[] GetPixelData(Bitmap bmp)
+        static byte[] GetPixelData(SKBitmap bmp)
         {
-            var bits = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            var buffer = new byte[bmp.Width * bmp.Height << 2];
-            Marshal.Copy(bits.Scan0, buffer, 0, buffer.Length);
-            bmp.UnlockBits(bits);
-            return buffer;
+            return bmp.GetPixelSpan().ToArray();
         }
         private static void ProcessLRLE(string inputFile, string outputFile, bool convertBack)
         {
@@ -82,13 +76,13 @@ namespace LREParser
             {
                 var lrleReader = LRLEUtility.GetReader(fs);
                 var lrleWriter = LRLEUtility.GetWriter();
-                Bitmap[] bitmaps = new Bitmap[lrleReader.MipCount];
+                SKBitmap[] bitmaps = new SKBitmap[Math.Min(lrleReader.MipCount,maxMips)];
                 using (Timer("All mipmaps decoded"))
                 {
 
                     foreach (var mip in lrleReader.MipMaps.Take(maxMips))
                     {
-                        Bitmap bmp;
+                        SKBitmap bmp;
                         using (Timer($"Decoding mip {mip.Index}"))
                         {
                             bmp = ExtractMipMapData(mip,fs);
@@ -144,15 +138,15 @@ namespace LREParser
         {
             using (var fs = File.Create(lrle))
             {
-                var bmp = (Bitmap)Image.FromFile(inputFile);
+                var bmp = SKBitmap.Decode(fs);
                 var encoder = LRLEUtility.GetWriter();
                 int w = bmp.Width;
                 int h = bmp.Height;
-                List<Bitmap> bitmaps = new List<Bitmap>();
+                List<SKBitmap> bitmaps = new List<SKBitmap>();
                 using (Timer("All mips resized"))
                 {
                     int mip = 0;
-                    Bitmap mipBmp = bmp;
+                    SKBitmap mipBmp = bmp;
                     do
                     {
                         int mipWidth = w >> mip;
@@ -161,19 +155,10 @@ namespace LREParser
                         {
                             if (w != mipWidth || h != mipHeight)
                             {
-                                mipBmp = new Bitmap(w >> mip, h >> mip);
-                                mipBmp.SetResolution(bmp.HorizontalResolution, bmp.VerticalResolution);
-                                using (var g = Graphics.FromImage(mipBmp))
+                                mipBmp = new SKBitmap(w >> mip, h >> mip);
+                                using (var g = new SKCanvas(mipBmp))
                                 {
-                                    if (!fast)
-                                    {
-                                        g.CompositingMode = CompositingMode.SourceCopy;
-                                        g.CompositingQuality = CompositingQuality.HighQuality;
-                                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                                        g.SmoothingMode = SmoothingMode.HighQuality;
-                                    }
-                                    g.DrawImage(bmp, new Rectangle(0, 0, mipBmp.Width, mipBmp.Height));
+                                    g.DrawBitmap(bmp, new SKRect(0, 0, mipBmp.Width, mipBmp.Height));
                                 }
                             }
                         }
@@ -189,10 +174,7 @@ namespace LREParser
                     {
                         using (Timer($"Extracting mip {mip++} pixel runs"))
                         {
-                            var bits = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-                            byte[] bytes = new byte[b.Width * b.Height << 2];
-                            Marshal.Copy(bits.Scan0, bytes, 0, bytes.Length);
-                            b.UnlockBits(bits);
+                            byte[] bytes = b.GetPixelSpan().ToArray();
                             encoder.AddMip(b.Width, b.Height, bytes);
                         }
                     }
@@ -225,14 +207,14 @@ namespace LREParser
             }
         }
 
-        private static Bitmap ExtractMipMapData(LRLEUtility.Reader.Mip mip, Stream source)
+        private static SKBitmap ExtractMipMapData(LRLEUtility.Reader.Mip mip, Stream source)
         {
-            var bmp = new Bitmap(mip.Width, mip.Height);
+            var bmp = new SKBitmap(mip.Width, mip.Height);
             if (saveMips || mip.Index == 0)
             {
-                var bits = bmp.LockBits(new Rectangle(0, 0, mip.Width, mip.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-                mip.Read(bits.Scan0,source);
-                bmp.UnlockBits(bits);
+                var p = Marshal.AllocHGlobal(mip.Width * mip.Height * 4);
+                mip.Read(p,source);
+                bmp.InstallPixels(new SKImageInfo(mip.Width, mip.Height,SKColorType.Bgra8888), p);
             }
             return bmp;
 
